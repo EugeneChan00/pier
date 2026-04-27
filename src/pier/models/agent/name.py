@@ -1,0 +1,17 @@
+from enum import Enum
+
+
+class AgentName(str, Enum):
+    ORACLE = "oracle"
+    NOP = "nop"
+    CLAUDE_CODE = "claude-code"
+    CODEX = "codex"
+    GEMINI_CLI = "gemini-cli"
+    MINI_SWE_AGENT = "mini-swe-agent"
+    SWE_AGENT = "swe-agent"
+    OPENCODE = "opencode"
+    TAIGA = "taiga"
+
+    @classmethod
+    def values(cls) -> set[str]:
+        return {member.value for member in cls}
