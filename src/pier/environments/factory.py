@@ -20,7 +20,7 @@ class _EnvEntry(NamedTuple):
 
 # Registry of built-in environment types. Modules are imported lazily so optional
 # vendor SDKs are only loaded when that environment is requested. Pier only ships
-# Docker and Modal; other Harbor environment backends are not included.
+# Docker and Modal; other Pier environment backends are not included.
 _ENVIRONMENT_REGISTRY: dict[EnvironmentType, _EnvEntry] = {
     EnvironmentType.DOCKER: _EnvEntry(
         "pier.environments.docker.docker",

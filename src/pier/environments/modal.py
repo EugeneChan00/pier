@@ -236,7 +236,7 @@ class _ModalDinD(_ModalStrategy):
         self._use_prebuilt = False
 
         self._resolved_task_env: dict[str, str] = {}
-        harbor_keys = set(self._infra_env_vars().keys())
+        pier_keys = set(self._infra_env_vars().keys())
         if self._env.task_env_config.env:
             self._resolved_task_env = resolve_env_vars(self._env.task_env_config.env)
 
@@ -244,7 +244,7 @@ class _ModalDinD(_ModalStrategy):
             self._env._persistent_env.keys()
         )
         if resolved_task_keys:
-            collisions = harbor_keys & resolved_task_keys
+            collisions = pier_keys & resolved_task_keys
             if collisions:
                 self._env.logger.warning(
                     "Environment vars override Pier compose variable(s): %s",
@@ -579,7 +579,7 @@ class _ModalDinD(_ModalStrategy):
 
     async def upload_file(self, source_path: Path | str, target_path: str) -> None:
         """Two-hop upload: SDK → sandbox temp, docker compose cp → main."""
-        temp = f"/tmp/harbor_{uuid4().hex}"
+        temp = f"/tmp/pier_{uuid4().hex}"
         try:
             await self._env._sdk_upload_file(source_path, temp)
             result = await self._compose_exec(
@@ -594,7 +594,7 @@ class _ModalDinD(_ModalStrategy):
 
     async def upload_dir(self, source_dir: Path | str, target_dir: str) -> None:
         """Two-hop upload: SDK → sandbox temp dir, docker compose cp → main."""
-        temp = f"/tmp/harbor_{uuid4().hex}"
+        temp = f"/tmp/pier_{uuid4().hex}"
         try:
             await self._env._sdk_upload_dir(source_dir, temp)
             result = await self._compose_exec(
@@ -638,7 +638,7 @@ class _ModalDinD(_ModalStrategy):
             await self._env._sdk_download_file(sandbox_path, target_path)
             return
 
-        temp = f"/tmp/harbor_{uuid4().hex}"
+        temp = f"/tmp/pier_{uuid4().hex}"
         try:
             result = await self._compose_exec(
                 ["cp", f"main:{source_path}", temp], timeout_sec=60
@@ -663,7 +663,7 @@ class _ModalDinD(_ModalStrategy):
             await self._env._sdk_download_dir(sandbox_path, target_dir)
             return
 
-        temp = f"/tmp/harbor_{uuid4().hex}"
+        temp = f"/tmp/pier_{uuid4().hex}"
         try:
             await self._vm_exec(f"mkdir -p {shlex.quote(temp)}", timeout_sec=10)
             result = await self._compose_exec(
@@ -766,7 +766,7 @@ class ModalEnvironment(BaseEnvironment):
         secrets: list[str] | None = None,
         registry_secret: str | None = None,
         volumes: dict[str, str] | None = None,
-        app_name: str = "__harbor__",
+        app_name: str = "__pier__",
         sandbox_timeout_secs: int = 60 * 60 * 24,
         sandbox_idle_timeout_secs: int | None = None,
         *args,
@@ -791,7 +791,7 @@ class ModalEnvironment(BaseEnvironment):
             volumes: Optional mapping of mount paths to Modal volume names.
             app_name: Name of the Modal App to use. All sandboxes created
                 with the same app name share a single Modal App. Default
-                is "__harbor__".
+                is "__pier__".
             sandbox_timeout_secs: Maximum lifetime of the sandbox in seconds.
                 The sandbox will be terminated after this duration regardless of
                 activity. Default is 86400 (24 hours). See Modal sandbox docs:
