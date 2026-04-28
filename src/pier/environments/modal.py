@@ -187,10 +187,10 @@ class _ModalDirect(_ModalStrategy):
         env._sandbox = await env._create_sandbox()
 
         await env._sandbox.filesystem.make_directory.aio(
-            str(EnvironmentPaths.agent_dir), parents=True
+            str(EnvironmentPaths.agent_dir), create_parents=True
         )
         await env._sandbox.filesystem.make_directory.aio(
-            str(EnvironmentPaths.verifier_dir), parents=True
+            str(EnvironmentPaths.verifier_dir), create_parents=True
         )
 
         # Make log directories world-writable so non-root agent/verifier
