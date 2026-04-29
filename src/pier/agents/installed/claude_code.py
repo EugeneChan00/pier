@@ -230,7 +230,9 @@ class ClaudeCodeVertexBackend(ClaudeCodeBackend):
 
         # Write to a host tempfile, upload via the environment transport,
         # then delete. Keeps the secret out of shell-argv and logs.
-        fd, local_path_str = tempfile.mkstemp(prefix="pier-claude-gcp-sa-", suffix=".json")
+        fd, local_path_str = tempfile.mkstemp(
+            prefix="pier-claude-gcp-sa-", suffix=".json"
+        )
         local_path = Path(local_path_str)
         try:
             with os.fdopen(fd, "w") as f:
@@ -292,6 +294,7 @@ class ClaudeCode(BaseInstalledAgent):
             "disallowed_tools",
             cli="--disallowedTools",
             type="str",
+            default="EnterPlanMode",
         ),
     ]
     ENV_VARS = [
@@ -375,7 +378,9 @@ class ClaudeCode(BaseInstalledAgent):
         # (OpenRouter, self-hosted); everything else defers to the backend.
         backend = self.backend_spec()
         if isinstance(backend, ClaudeCodeAnthropicBackend):
-            override = backend.allowlist_for_base_url(self.backend_context(self._get_env))
+            override = backend.allowlist_for_base_url(
+                self.backend_context(self._get_env)
+            )
             if override:
                 return override
         return super().network_allowlist()
