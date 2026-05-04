@@ -458,10 +458,13 @@ class OpenCode(BaseInstalledAgent):
         elif provider == "openrouter":
             keys.append("OPENROUTER_API_KEY")
         else:
-            raise ValueError(
-                f"Unknown provider {provider}. If you believe this provider "
-                "should be supported, please contact the maintainers."
-            )
+            configured_providers = self._opencode_config.get("provider") or {}
+            if provider not in configured_providers:
+                raise ValueError(
+                    f"Unknown provider {provider}. If you believe this provider "
+                    "should be supported, provide agents[].kwargs.opencode_config.provider."
+                    f"{provider} in the job config."
+                )
 
         for key in keys:
             if value := self._get_env(key):

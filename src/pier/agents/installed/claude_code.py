@@ -44,8 +44,26 @@ class ClaudeCode(BaseInstalledAgent):
             "reasoning_effort",
             cli="--effort",
             type="enum",
-            choices=["low", "medium", "high", "max"],
+            choices=["low", "medium", "high", "xhigh", "max"],
             env_fallback="CLAUDE_CODE_EFFORT_LEVEL",
+        ),
+        CliFlag(
+            "thinking",
+            cli="--thinking",
+            type="enum",
+            choices=["enabled", "adaptive", "disabled"],
+        ),
+        CliFlag(
+            "thinking_display",
+            cli="--thinking-display",
+            type="enum",
+            choices=["summarized", "omitted"],
+        ),
+        CliFlag(
+            "max_thinking_tokens",
+            cli="--max-thinking-tokens",
+            type="int",
+            env_fallback="MAX_THINKING_TOKENS",
         ),
         CliFlag(
             "max_budget_usd",
@@ -1024,9 +1042,8 @@ class ClaudeCode(BaseInstalledAgent):
         use_bedrock = self._is_bedrock_mode()
 
         env = {
-            "ANTHROPIC_API_KEY": self._get_env("ANTHROPIC_API_KEY")
-            or self._get_env("ANTHROPIC_AUTH_TOKEN")
-            or "",
+            "ANTHROPIC_API_KEY": self._get_env("ANTHROPIC_API_KEY") or "",
+            "ANTHROPIC_AUTH_TOKEN": self._get_env("ANTHROPIC_AUTH_TOKEN") or "",
             "ANTHROPIC_BASE_URL": self._get_env("ANTHROPIC_BASE_URL"),
             "CLAUDE_CODE_OAUTH_TOKEN": self._get_env("CLAUDE_CODE_OAUTH_TOKEN") or "",
             "CLAUDE_CODE_MAX_OUTPUT_TOKENS": self._get_env(

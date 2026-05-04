@@ -526,8 +526,13 @@ class MiniSweAgent(BaseInstalledAgent):
         cli_flags = self.build_cli_flags()
         extra_flags = (cli_flags + " ") if cli_flags else ""
 
-        # Write custom config into the container if provided
+        # mini-swe-agent v2 does not load its default config when any -c flag
+        # is passed, so include mini.yaml before Pier-provided overrides.
         config_flags = ""
+        if self._config_yaml or self._reasoning_effort:
+            config_flags = "-c mini.yaml "
+
+        # Write custom config into the container if provided
         if self._config_yaml:
             config_path = "/tmp/mswea-config/custom.yaml"
             heredoc_marker = f"MSWEA_CONFIG_EOF_{uuid.uuid4().hex[:8]}"
@@ -538,10 +543,10 @@ class MiniSweAgent(BaseInstalledAgent):
                 f"{heredoc_marker}\n"
             )
             await self.exec_as_agent(environment, command=write_config_cmd, env=env)
-            config_flags = f"-c {config_path} "
+            config_flags += f"-c {config_path} "
 
         if self._reasoning_effort:
-            config_flags += f"-c model.model_kwargs.extra_body.reasoning_effort={shlex.quote(self._reasoning_effort)} "
+            config_flags += f"-c model.model_kwargs.reasoning_effort={shlex.quote(self._reasoning_effort)} "
 
         await self.exec_as_agent(
             environment,

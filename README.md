@@ -66,10 +66,35 @@ agents:
   - name: claude-code
     model_name: anthropic/claude-opus-4-7
     env:
-      ANTHROPIC_API_KEY: ${RESPAN_API_KEY}
+      ANTHROPIC_AUTH_TOKEN: ${RESPAN_API_KEY}
       ANTHROPIC_BASE_URL: https://endpoint.respan.ai/api/anthropic/
+      ANTHROPIC_CUSTOM_HEADERS: "X-Respan-Route-Provider: vertex_ai"
     kwargs:
       reasoning_effort: max
+```
+
+OpenCode exposes `opencode_config` for provider entries that Pier does not know
+about:
+
+```yaml
+agents:
+  - name: opencode
+    model_name: respan-gemini/gemini-3.1-pro-preview
+    env:
+      GEMINI_API_KEY: ${RESPAN_API_KEY}
+    kwargs:
+      opencode_config:
+        provider:
+          respan-gemini:
+            npm: ai-sdk-provider-gemini-cli
+            name: Respan Gemini
+            options:
+              authType: api-key
+              baseURL: https://endpoint.respan.ai/api/google/vertexai/
+              apiKey: "{env:GEMINI_API_KEY}"
+            models:
+              gemini-3.1-pro-preview:
+                name: Gemini 3.1 Pro Preview
 ```
 
 Codex exposes `command_model_name`, `config_toml`, and `config_toml_file` kwargs
