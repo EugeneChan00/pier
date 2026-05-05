@@ -38,6 +38,7 @@ DIAGNOSTIC_TRIAL_DIRNAME = "trial"
 DIAGNOSTIC_RESULT_FILENAME = "diagnostic-result.json"
 DIAGNOSTIC_MARKDOWN_FILENAME = "diagnostic-result.md"
 DIAGNOSTIC_PROMPT_FILENAME = "prompt.md"
+DIAGNOSTIC_RUNS_DIRNAME = ".diagnostics"
 
 
 @dataclass(frozen=True)
@@ -89,7 +90,7 @@ def is_trial_dir(path: Path) -> bool:
 
 
 def diagnostic_run_dir(source_job_dir: Path, run_name: str) -> Path:
-    return source_job_dir / "diagnostics" / run_name
+    return source_job_dir / DIAGNOSTIC_RUNS_DIRNAME / run_name
 
 
 def _replace_template_vars(template: str, values: dict[str, str]) -> str:
