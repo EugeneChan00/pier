@@ -12,6 +12,8 @@ Pier is a fork. We wanted a smaller, more opinionated base to build on, starting
 
 When the agent runs *inside* the sandbox, both the install step and the inference call need the network. Pier fixes that by letting agents declare their install scripts and a network allowlist, which `docker` and `modal` environments honor when setting up the sandbox.
 
+Pier also keeps task environments closer to their Docker definitions. Commands run through non-login shells so Dockerfile-provided environment variables, especially `PATH`, are preserved the same way they are under local Docker execution. Filtered-egress proxy variables are scoped to installed-agent setup and inference commands only; they are not injected into the task or verifier environment.
+
 Since then Pier has also picked up an augmented ATIF v1.7 (strict one step per API turn, strict reasoning vs agent message separation, no fabricated assistant text, `peak_context_tokens`, `summarization_count`, `llm_call_count`, real upstream timestamps), a chat-style trajectory viewer, and `pier critique run` for inspecting completed trials with a fresh agent in a fresh sandbox.
 
 ## What works today

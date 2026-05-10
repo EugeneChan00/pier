@@ -14,7 +14,7 @@ EGRESS_PROXY_PORT = 8080
 
 
 def docker_run_command(script: str) -> str:
-    return "RUN " + json.dumps(["/bin/bash", "-lc", script])
+    return "RUN " + json.dumps(["/bin/bash", "-c", script])
 
 
 def _run_with_step_env(step: InstallStep) -> str:
@@ -158,9 +158,6 @@ def write_docker_proxy_compose(
     compose = {
         "services": {
             "main": {
-                "environment": proxy_environment(
-                    token, EGRESS_PROXY_SERVICE, EGRESS_PROXY_PORT
-                ),
                 "networks": ["pier-egress-internal"],
                 "depends_on": {
                     EGRESS_PROXY_SERVICE: {

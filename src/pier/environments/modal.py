@@ -207,7 +207,7 @@ class _ModalDirect(_ModalStrategy):
         timeout_sec: int | None = None,
     ) -> ExecResult:
         return await self._env._sdk_exec(
-            command, cwd=cwd, env=env, timeout_sec=timeout_sec, login=True
+            command, cwd=cwd, env=env, timeout_sec=timeout_sec
         )
 
     async def attach(self) -> None:
@@ -591,7 +591,7 @@ class _ModalDinD(_ModalStrategy):
                 parts.extend(["-e", f"{k}={v}"])
         if user is not None:
             parts.extend(["-u", str(user)])
-        parts.extend(["main", "bash", "-lc", command])
+        parts.extend(["main", "bash", "-c", command])
 
         return await self._compose_exec(parts, timeout_sec=timeout_sec)
 
@@ -914,9 +914,15 @@ class ModalEnvironment(BaseEnvironment):
             secrets.append(
                 Secret.from_dict(dict[str, str | None](self._persistent_env))
             )
-        if self._egress_proxy_env:
-            secrets.append(Secret.from_dict(self._egress_proxy_env))
         return secrets
+
+    def agent_process_env(self, env: dict[str, str] | None) -> dict[str, str] | None:
+        if not self._egress_proxy_env:
+            return env
+        merged = dict(self._egress_proxy_env)
+        if env:
+            merged.update(env)
+        return merged or None
 
     def _volumes_config(self) -> dict[str, Volume]:
         return {
@@ -1237,7 +1243,7 @@ class ModalEnvironment(BaseEnvironment):
                 user_arg = f"$(getent passwd {user} | cut -d: -f1)"
             else:
                 user_arg = shlex.quote(str(user))
-            command = f"su {user_arg} -s /bin/bash -c {shlex.quote(command)}"
+            command = f"su -m {user_arg} -s /bin/bash -c {shlex.quote(command)}"
 
         effective_cwd = cwd or self.task_env_config.workdir
         return await self._strategy.exec(

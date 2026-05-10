@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 
 
 class InstallStep(BaseModel):
-    """One install phase (maps to Dockerfile ``USER`` + ``RUN bash -lc …``)."""
+    """One install phase (maps to Dockerfile ``USER`` + ``RUN bash -c ...``)."""
 
     run: str
     user: Literal["root", "agent"] = "agent"

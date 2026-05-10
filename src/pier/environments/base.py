@@ -175,6 +175,14 @@ class BaseEnvironment(ABC):
             merged.update(env)
         return merged or None
 
+    def agent_process_env(self, env: dict[str, str] | None) -> dict[str, str] | None:
+        """Return environment variables for installed-agent commands.
+
+        Filtered-egress environments override this to scope proxy variables to
+        agent setup/run commands instead of verifier and task commands.
+        """
+        return env
+
     def _reset_dirs_command(
         self,
         *,

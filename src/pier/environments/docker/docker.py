@@ -12,7 +12,10 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from pier.environments.agent_setup import (
+    EGRESS_PROXY_PORT,
+    EGRESS_PROXY_SERVICE,
     new_proxy_token,
+    proxy_environment,
     write_agent_dockerfile,
     write_docker_proxy_compose,
 )
@@ -179,6 +182,7 @@ class DockerEnvironment(BaseEnvironment):
         self._mounts_compose_path: Path | None = None
         self._agent_build_context_dir: Path | None = None
         self._egress_proxy_compose_path: Path | None = None
+        self._egress_proxy_env: dict[str, str] = {}
 
         # Select the platform-specific file-transfer and exec helpers.
         if self._is_windows_container:
@@ -361,12 +365,23 @@ class DockerEnvironment(BaseEnvironment):
                 "or prebuilt-image tasks, not docker-compose tasks."
             )
         token = new_proxy_token()
+        self._egress_proxy_env = proxy_environment(
+            token, EGRESS_PROXY_SERVICE, EGRESS_PROXY_PORT
+        )
         self._egress_proxy_compose_path = write_docker_proxy_compose(
             path=self.trial_paths.trial_dir / "docker-compose-egress-proxy.json",
             proxy_dir=self.trial_paths.trial_dir / "egress-proxy",
             allowlist=allowlist,
             token=token,
         )
+
+    def agent_process_env(self, env: dict[str, str] | None) -> dict[str, str] | None:
+        if not self._egress_proxy_env:
+            return env
+        merged = dict(self._egress_proxy_env)
+        if env:
+            merged.update(env)
+        return merged or None
 
     def _write_mounts_compose_file(self) -> Path:
         """Write a docker-compose override file with additional volume mounts."""

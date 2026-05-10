@@ -333,7 +333,7 @@ class BaseInstalledAgent(BaseAgent, ABC):
         result = await environment.exec(
             command=f"set -o pipefail; {command}",
             user=user,
-            env=merged_env,
+            env=environment.agent_process_env(merged_env),
             cwd=cwd,
             timeout_sec=timeout_sec,
         )
