@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 from typing import NamedTuple
 
+from pier.constants import PYPI_PACKAGE_NAME
 from pier.environments.base import BaseEnvironment
 from pier.models.agent.install import AgentInstallSpec
 from pier.models.agent.network import NetworkAllowlist
@@ -59,9 +60,8 @@ def _load_environment_class(env_type: EnvironmentType) -> type[BaseEnvironment]:
             raise ImportError(
                 f"The '{env_type.value}' environment requires extra dependencies. "
                 f"Install them with:\n"
-                f"  pip install 'pier[{entry.pip_extra}]'\n"
-                f"  uv tool install 'pier[{entry.pip_extra}]'\n"
-                f"Or install all cloud environments with 'pier[cloud]'."
+                f"  pip install {PYPI_PACKAGE_NAME}\n"
+                f"  uv tool install {PYPI_PACKAGE_NAME}"
             ) from exc
         raise
 

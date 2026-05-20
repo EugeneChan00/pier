@@ -1,8 +1,22 @@
 [project]
-name = "pier"
+name = "datacurve-pier"
 version = "0.1.0"
 description = "A framework for running coding agents in sandboxed environments and keeping full trajectories for analysis."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.12"
+keywords = ["agents", "evaluation", "sandbox", "coding-agents", "harbor"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
+]
 dependencies = [
     "anthropic>=0.97.0",
     "anyio>=4.13.0",
@@ -28,6 +42,9 @@ dependencies = [
 
 [project.scripts]
 pier = "pier.cli.main:app"
+
+[tool.uv.build-backend]
+module-name = "pier"
 
 [build-system]
 requires = ["uv_build>=0.8.4,<0.9.0"]

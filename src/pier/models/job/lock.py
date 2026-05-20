@@ -14,6 +14,7 @@ from urllib.request import url2pathname
 
 from pydantic import BaseModel, Field, field_validator
 
+from pier.constants import PYPI_PACKAGE_NAME
 from pier.models.job.config import JobConfig, RetryConfig
 from pier.models.trial.config import (
     AgentConfig,
@@ -226,7 +227,7 @@ def _get_pier_info() -> PierLockInfo:
 
 def _get_pier_version() -> str | None:
     try:
-        return version("pier")
+        return version(PYPI_PACKAGE_NAME)
     except PackageNotFoundError:
         return None
 

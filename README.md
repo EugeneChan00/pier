@@ -28,9 +28,9 @@ Pier does not currently resolve or download Harbor registry datasets directly.
 ## Install
 
 ```bash
-uv tool install <tbd>
+uv tool install datacurve-pier
 # or
-pip install <tbd>
+pip install datacurve-pier
 ```
 
 ## Run

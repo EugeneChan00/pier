@@ -1,9 +1,10 @@
-"""Helpers for optional (extra) dependencies.
+"""Helpers for environment integration dependencies.
 
-Cloud-provider SDKs are optional extras so that ``pip install pier`` stays
-lean.  The utilities here produce clear, actionable error messages when a
-user tries to use a feature that requires a missing extra.
+The utilities here produce clear, actionable error messages when a user tries
+to use a feature that requires a missing provider package.
 """
+
+from pier.constants import PYPI_PACKAGE_NAME
 
 
 class MissingExtraError(ImportError):
@@ -14,7 +15,8 @@ class MissingExtraError(ImportError):
     package:
         The PyPI package name that is missing (e.g. ``"daytona"``).
     extra:
-        The ``pier`` extra that provides this package (e.g. ``"daytona"``).
+        The future ``datacurve-pier`` extra that provides this package
+        (e.g. ``"daytona"``).
     """
 
     def __init__(self, *, package: str, extra: str) -> None:
@@ -23,7 +25,6 @@ class MissingExtraError(ImportError):
         super().__init__(
             f"The '{package}' package is required but not installed. "
             f"Install it with:\n"
-            f"  pip install 'pier[{extra}]'\n"
-            f"  uv tool install 'pier[{extra}]'\n"
-            f"Or install all cloud environments with 'pier[cloud]'."
+            f"  pip install {PYPI_PACKAGE_NAME}\n"
+            f"  uv tool install {PYPI_PACKAGE_NAME}"
         )

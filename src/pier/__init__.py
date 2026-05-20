@@ -1,3 +1,5 @@
 import importlib.metadata
 
-__version__ = importlib.metadata.version("pier")
+from pier.constants import PYPI_PACKAGE_NAME
+
+__version__ = importlib.metadata.version(PYPI_PACKAGE_NAME)
