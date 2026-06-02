@@ -19,7 +19,7 @@ Pier is a fork. We wanted a smaller, more opinionated base to build on. On top o
 
 - **Task format:** Harbor-compatible.
 - **Environments:** `docker`, `modal`. Per-agent install specs and network allowlists are honored on both, so installed agents work under `allow_internet = false`.
-- **Agents:** `nop`, `oracle`, `claude-code`, `codex`, `cursor-cli`, `gemini-cli`, `opencode`, `mini-swe-agent`. All emit augmented ATIF v1.7.
+- **Agents:** `nop`, `oracle`, `claude-code`, `codex`, `cursor-cli`, `gemini-cli`, `mastra-code`, `opencode`, `mini-swe-agent`. All emit augmented ATIF v1.7.
 - **Datasets:** local Harbor-format task directories via `-p` / `--path`.
 - **CLI:** `pier run`, `pier job`, `pier view`, `pier critique run`, `pier check` / `pier analyze` (vendored from Harbor)
 
@@ -75,6 +75,24 @@ A few things we've learned plumbing this through Respan and OpenRouter:
     reasoning_effort: max
 ```
 
+For Claude-compatible proxy aliases, set the alias env vars explicitly. Pier preserves them instead of collapsing every Claude alias to `ANTHROPIC_MODEL`.
+
+```yaml
+- name: claude-code
+  model_name: gpt-5.5(xhigh)
+  env:
+    CLI_PROXY_API_KEY: ${CLI_PROXY_API_KEY}
+    ANTHROPIC_BASE_URL: https://aa.renaissancelab.org
+    ANTHROPIC_DEFAULT_OPUS_MODEL: gpt-5.5(xhigh)
+    ANTHROPIC_DEFAULT_SONNET_MODEL: gpt-5.5(xhigh)
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: gpt-5.5(xhigh)
+    CLAUDE_CODE_SUBAGENT_MODEL: gpt-5.5(xhigh)
+  kwargs:
+    reasoning_effort: max
+```
+
+The CLI proxy model endpoint lists the base model `gpt-5.5`. Its accepted thinking suffix syntax is parenthesized, e.g. `gpt-5.5(low)`, `gpt-5.5(xhigh)`, and on the Anthropic-compatible route `gpt-5.5(max)`. The proxy strips the suffix before upstream routing and reports the response model as `gpt-5.5`. Hyphenated forms like `gpt-5.5-(xhigh)` are not accepted. Harness/request effort is separate from the proxy model selector; CLIProxyAPI gives a model suffix priority over body/request effort when both are present.
+
 **Codex** needs a `[model_providers.<name>]` block with `wire_api = "responses"` (not WebSockets, which Codex defaults to and Respan doesn't speak).
 
 ```yaml
@@ -115,6 +133,22 @@ through your env file.
   env:
     CURSOR_API_KEY: ${CURSOR_API_KEY}
 ```
+
+**Mastra Code** uses the installed `mastracode` CLI in headless `stream-json` mode. Set `model_name` to a Mastra-supported model id or omit it and choose a built-in mode with `kwargs.mode`.
+
+```yaml
+- name: mastra-code
+  model_name: openai/gpt-5.5(xhigh)
+  env:
+    CLI_PROXY_API_KEY: ${CLI_PROXY_API_KEY}
+    OPENAI_BASE_URL: https://aa.renaissancelab.org/v1
+  kwargs:
+    thinking_level: xhigh
+```
+
+Mastra Code's `thinking_level` maps to the OpenAI-compatible proxy reasoning effort. That route accepts `gpt-5.5(low)`, `gpt-5.5(xhigh)`, and matching request efforts `low`, `medium`, `high`, and `xhigh`; it rejects `max`, so `xhigh` is the highest valid Mastra setting.
+
+For CLI Proxy GPT-5.5 suffix variants, Pier strips the parenthesized suffix before invoking Mastra's local `--model` validator, then starts a local OpenAI-compatible shim that rewrites the outbound request model back to `gpt-5.5(low)` or `gpt-5.5(xhigh)`. This keeps `model_name` as the benchmark selector while `thinking_level` remains the harness/request effort.
 
 **OpenCode** uses `opencode_config` to add unknown providers or override known ones. To redirect Google to Respan, override just `options.baseURL`; to add a fully custom provider, use `opencode_config.provider.<name>` with the npm package, options, and models.
 

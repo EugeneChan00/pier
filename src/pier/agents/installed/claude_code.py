@@ -141,9 +141,9 @@ class ClaudeCode(BaseInstalledAgent):
             "if command -v apk &> /dev/null; then"
             "  apk add --no-cache curl bash nodejs npm;"
             " elif command -v apt-get &> /dev/null; then"
-            "  apt-get update && apt-get install -y curl;"
+            "  apt-get update && apt-get install -y curl nodejs;"
             " elif command -v yum &> /dev/null; then"
-            "  yum install -y curl;"
+            "  yum install -y curl nodejs;"
             " else"
             '  echo "Warning: No known package manager found, assuming curl is available" >&2;'
             " fi"
@@ -178,11 +178,19 @@ class ClaudeCode(BaseInstalledAgent):
         if self._is_bedrock_mode():
             return NetworkAllowlist(domains=[".amazonaws.com"])
 
-        base_url = self._get_env("ANTHROPIC_BASE_URL")
-        if base_url:
+        domains: list[str] = []
+        for base_url in (
+            self._get_env("ANTHROPIC_BASE_URL"),
+            self._get_env("PIER_CLAUDE_CODE_UPSTREAM_BASE_URL"),
+        ):
+            if not base_url:
+                continue
             parsed = urlparse(base_url if "://" in base_url else f"https://{base_url}")
-            if parsed.hostname:
-                return NetworkAllowlist(domains=[parsed.hostname])
+            if parsed.hostname and parsed.hostname not in {"127.0.0.1", "localhost"}:
+                domains.append(parsed.hostname)
+
+        if domains:
+            return NetworkAllowlist(domains=sorted(set(domains)))
 
         return NetworkAllowlist(domains=["api.anthropic.com"])
 
@@ -1202,16 +1210,14 @@ class ClaudeCode(BaseInstalledAgent):
             return True
         return False
 
-    @with_prompt_template
-    async def run(
-        self, instruction: str, environment: BaseEnvironment, context: AgentContext
-    ) -> None:
-        escaped_instruction = shlex.quote(instruction)
-
+    def _build_runtime_env(self) -> dict[str, str]:
+        """Build Claude Code's runtime environment, preserving explicit aliases."""
         use_bedrock = self._is_bedrock_mode()
 
         env = {
-            "ANTHROPIC_API_KEY": self._get_env("ANTHROPIC_API_KEY") or "",
+            "ANTHROPIC_API_KEY": self._get_env("ANTHROPIC_API_KEY")
+            or self._get_env("CLI_PROXY_API_KEY")
+            or "",
             "ANTHROPIC_AUTH_TOKEN": self._get_env("ANTHROPIC_AUTH_TOKEN") or "",
             "ANTHROPIC_BASE_URL": self._get_env("ANTHROPIC_BASE_URL"),
             "CLAUDE_CODE_OAUTH_TOKEN": self._get_env("CLAUDE_CODE_OAUTH_TOKEN") or "",
@@ -1281,12 +1287,13 @@ class ClaudeCode(BaseInstalledAgent):
         elif self._get_env("ANTHROPIC_MODEL"):
             env["ANTHROPIC_MODEL"] = self._get_env("ANTHROPIC_MODEL") or ""
 
-        # When using custom base URL, set all model aliases to the same model
+        # Custom Anthropic-compatible proxies often expose Claude model aliases.
+        # Fill defaults for convenience, but keep explicit agent.env alias routing.
         if "ANTHROPIC_BASE_URL" in env and "ANTHROPIC_MODEL" in env:
-            env["ANTHROPIC_DEFAULT_SONNET_MODEL"] = env["ANTHROPIC_MODEL"]
-            env["ANTHROPIC_DEFAULT_OPUS_MODEL"] = env["ANTHROPIC_MODEL"]
-            env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = env["ANTHROPIC_MODEL"]
-            env["CLAUDE_CODE_SUBAGENT_MODEL"] = env["ANTHROPIC_MODEL"]
+            env.setdefault("ANTHROPIC_DEFAULT_SONNET_MODEL", env["ANTHROPIC_MODEL"])
+            env.setdefault("ANTHROPIC_DEFAULT_OPUS_MODEL", env["ANTHROPIC_MODEL"])
+            env.setdefault("ANTHROPIC_DEFAULT_HAIKU_MODEL", env["ANTHROPIC_MODEL"])
+            env.setdefault("CLAUDE_CODE_SUBAGENT_MODEL", env["ANTHROPIC_MODEL"])
 
         # Disable adaptive thinking if requested
         if os.environ.get("CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "").strip() == "1":
@@ -1301,6 +1308,312 @@ class ClaudeCode(BaseInstalledAgent):
         # Merge declarative env vars (e.g. MAX_THINKING_TOKENS)
         env.update(self._resolved_env_vars)
 
+        return env
+
+    @staticmethod
+    def _is_truthy_env(value: str | None) -> bool:
+        return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+    def _should_use_cli_proxy_system_shim(self, env: dict[str, str]) -> bool:
+        forced = self._get_env("CLAUDE_CODE_CLI_PROXY_SYSTEM_SHIM")
+        if forced is not None:
+            return self._is_truthy_env(forced)
+
+        base_url = env.get("ANTHROPIC_BASE_URL")
+        if not base_url:
+            return False
+        parsed = urlparse(base_url if "://" in base_url else f"https://{base_url}")
+        return parsed.hostname == "aa.renaissancelab.org"
+
+    def _configure_cli_proxy_system_shim_env(self, env: dict[str, str]) -> bool:
+        if not self._should_use_cli_proxy_system_shim(env):
+            return False
+
+        upstream = (
+            self._get_env("PIER_CLAUDE_CODE_UPSTREAM_BASE_URL")
+            or env.get("ANTHROPIC_BASE_URL")
+        )
+        if not upstream:
+            return False
+
+        env["PIER_CLAUDE_CODE_UPSTREAM_BASE_URL"] = upstream
+        env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:18765"
+        env["NO_PROXY"] = "127.0.0.1,localhost"
+        env["no_proxy"] = "127.0.0.1,localhost"
+        self._extra_env["PIER_CLAUDE_CODE_UPSTREAM_BASE_URL"] = upstream
+        self._extra_env["ANTHROPIC_BASE_URL"] = env["ANTHROPIC_BASE_URL"]
+        self._extra_env["NO_PROXY"] = env["NO_PROXY"]
+        self._extra_env["no_proxy"] = env["no_proxy"]
+        return True
+
+    @staticmethod
+    def _build_cli_proxy_system_shim_command() -> str:
+        log_path = (EnvironmentPaths.agent_dir / "claude-code-shim.log").as_posix()
+        ready_path = "/tmp/pier-claude-code-cli-proxy-shim.ready"
+        script_path = "/tmp/pier-claude-code-cli-proxy-shim.js"
+        script = r"""
+const http = require('http');
+const https = require('https');
+const fs = require('fs');
+const tls = require('tls');
+const { EventEmitter } = require('events');
+const { URL } = require('url');
+
+const upstreamBase = new URL(process.env.PIER_CLAUDE_CODE_UPSTREAM_BASE_URL || 'https://aa.renaissancelab.org');
+const apiKey = process.env.ANTHROPIC_API_KEY || process.env.CLI_PROXY_API_KEY || '';
+const port = Number(process.env.PIER_CLAUDE_CODE_SHIM_PORT || '18765');
+const readyFile = process.env.PIER_CLAUDE_CODE_SHIM_READY_FILE || '/tmp/pier-claude-code-cli-proxy-shim.ready';
+
+function contentToText(content) {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map((item) => {
+      if (item == null) return '';
+      if (typeof item === 'string') return item;
+      if (typeof item.text === 'string') return item.text;
+      return JSON.stringify(item);
+    }).filter(Boolean).join('\n');
+  }
+  if (typeof content.text === 'string') return content.text;
+  return JSON.stringify(content);
+}
+
+function prependText(content, text) {
+  if (Array.isArray(content)) {
+    return [{ type: 'text', text }, ...content];
+  }
+  const existing = contentToText(content);
+  return existing ? `${text}\n\n${existing}` : text;
+}
+
+function normalizeClaudeCodePayload(body) {
+  const systemParts = [];
+  if (body.system != null) {
+    systemParts.push(contentToText(body.system));
+    delete body.system;
+  }
+
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  const kept = [];
+  for (const message of messages) {
+    if (message && message.role === 'system') {
+      systemParts.push(contentToText(message.content));
+    } else {
+      kept.push(message);
+    }
+  }
+
+  const systemText = systemParts.map((part) => part.trim()).filter(Boolean).join('\n\n');
+  if (systemText) {
+    const wrapped = `<system-instructions>\n${systemText}\n</system-instructions>`;
+    const firstUserIndex = kept.findIndex((message) => message && message.role === 'user');
+    if (firstUserIndex >= 0) {
+      kept[firstUserIndex] = {
+        ...kept[firstUserIndex],
+        content: prependText(kept[firstUserIndex].content, wrapped),
+      };
+    } else {
+      kept.unshift({ role: 'user', content: wrapped });
+    }
+  }
+
+  body.messages = kept;
+  return body;
+}
+
+function upstreamUrlFor(reqUrl) {
+  const incoming = new URL(reqUrl, 'http://127.0.0.1');
+  const basePath = upstreamBase.pathname.replace(/\/+$/, '');
+  const upstream = new URL(upstreamBase.toString());
+  upstream.pathname = `${basePath}${incoming.pathname}`.replace(/\/{2,}/g, '/');
+  upstream.search = incoming.search;
+  return upstream;
+}
+
+function proxyUrl() {
+  const raw = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy;
+  if (!raw) return null;
+  try {
+    return new URL(raw);
+  } catch {
+    return null;
+  }
+}
+
+function requestViaProxy(target, headers, callback) {
+  const proxy = proxyUrl();
+  if (!proxy || target.protocol !== 'https:') {
+    return https.request(target, { method: 'POST', headers }, callback);
+  }
+
+  const connectHeaders = {};
+  if (proxy.username || proxy.password) {
+    const credentials = `${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`;
+    connectHeaders['Proxy-Authorization'] = `Basic ${Buffer.from(credentials).toString('base64')}`;
+  }
+
+  const connectReq = http.request({
+    host: proxy.hostname,
+    port: Number(proxy.port || '8080'),
+    method: 'CONNECT',
+    path: `${target.hostname}:443`,
+    headers: connectHeaders,
+  });
+
+  const request = new EventEmitter();
+  const bufferedChunks = [];
+  let upstreamReq = null;
+  let failed = false;
+
+  request.write = (chunk, encoding, cb) => {
+    if (upstreamReq) {
+      return upstreamReq.write(chunk, encoding, cb);
+    }
+    bufferedChunks.push({ chunk, encoding, cb });
+    if (typeof cb === 'function') cb();
+    return true;
+  };
+
+  request.end = (chunk, encoding, cb) => {
+    if (chunk != null) {
+      request.write(chunk, encoding);
+    }
+    request._ended = true;
+    request._endCb = cb;
+    if (upstreamReq) {
+      upstreamReq.end(undefined, undefined, cb);
+    }
+    return request;
+  };
+
+  connectReq.on('connect', (connectRes, socket) => {
+    if (connectRes.statusCode !== 200) {
+      failed = true;
+      request.emit('error', new Error(`proxy CONNECT failed: ${connectRes.statusCode}`));
+      socket.destroy();
+      return;
+    }
+    const tlsSocket = tls.connect({
+      socket,
+      servername: target.hostname,
+    });
+    upstreamReq = https.request(target, {
+      method: 'POST',
+      headers,
+      createConnection: () => tlsSocket,
+    }, callback);
+    upstreamReq.on('error', (error) => request.emit('error', error));
+    for (const item of bufferedChunks.splice(0)) {
+      upstreamReq.write(item.chunk, item.encoding, item.cb);
+    }
+    if (request._ended) {
+      upstreamReq.end(undefined, undefined, request._endCb);
+    }
+  });
+  connectReq.on('error', (error) => {
+    if (!failed) request.emit('error', error);
+  });
+  connectReq.end();
+
+  return request;
+}
+
+const server = http.createServer((req, res) => {
+  if (req.method !== 'POST') {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'not found' }));
+    return;
+  }
+
+  const chunks = [];
+  req.on('data', (chunk) => chunks.push(chunk));
+  req.on('end', () => {
+    let rawBody = Buffer.concat(chunks).toString('utf8');
+    let requestInfo = {};
+    try {
+      const parsed = JSON.parse(rawBody || '{}');
+      requestInfo = {
+        path: req.url,
+        method: req.method,
+        model: typeof parsed.model === 'string' ? parsed.model : undefined,
+        hasSystem: parsed.system != null,
+        messageRoles: Array.isArray(parsed.messages)
+          ? parsed.messages.map((message) => message && message.role).filter(Boolean)
+          : undefined,
+      };
+      rawBody = JSON.stringify(normalizeClaudeCodePayload(parsed));
+    } catch (error) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: `invalid json: ${error.message}` }));
+      return;
+    }
+
+    const target = upstreamUrlFor(req.url);
+    const headers = { ...req.headers };
+    delete headers.host;
+    delete headers['content-length'];
+    headers['content-type'] = 'application/json';
+    headers['content-length'] = Buffer.byteLength(rawBody);
+    headers['x-api-key'] = apiKey;
+    headers['authorization'] = `Bearer ${apiKey}`;
+    headers['anthropic-version'] = headers['anthropic-version'] || '2023-06-01';
+
+    const proxyReq = requestViaProxy(target, headers, (proxyRes) => {
+      console.error(JSON.stringify({
+        type: 'claude_code_shim_response',
+        ...requestInfo,
+        targetHost: target.hostname,
+        targetPath: `${target.pathname}${target.search}`,
+        statusCode: proxyRes.statusCode,
+      }));
+      res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+      proxyRes.pipe(res);
+    });
+    proxyReq.on('error', (error) => {
+      console.error(JSON.stringify({
+        type: 'claude_code_shim_error',
+        ...requestInfo,
+        targetHost: target.hostname,
+        targetPath: `${target.pathname}${target.search}`,
+        error: error.message,
+      }));
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: error.message }));
+    });
+    proxyReq.write(rawBody);
+    proxyReq.end();
+  });
+});
+
+server.listen(port, '127.0.0.1', () => {
+  fs.writeFileSync(readyFile, String(process.pid));
+});
+"""
+        escaped_script = script.strip() + "\n"
+        return (
+            f"mkdir -p {EnvironmentPaths.agent_dir.as_posix()} && "
+            f"cat > {script_path} <<'PIER_CLAUDE_CODE_SHIM'\n"
+            f"{escaped_script}"
+            "PIER_CLAUDE_CODE_SHIM\n"
+            f"rm -f {ready_path} && "
+            f"PIER_CLAUDE_CODE_SHIM_READY_FILE={ready_path} "
+            f"node {script_path} > {log_path} 2>&1 & "
+            f"for i in $(seq 1 50); do "
+            f"  [ -f {ready_path} ] && exit 0; "
+            "  sleep 0.1; "
+            "done; "
+            f"cat {log_path} >&2 || true; "
+            "exit 1"
+        )
+
+    @with_prompt_template
+    async def run(
+        self, instruction: str, environment: BaseEnvironment, context: AgentContext
+    ) -> None:
+        escaped_instruction = shlex.quote(instruction)
+
+        env = self._build_runtime_env()
         env["CLAUDE_CONFIG_DIR"] = (EnvironmentPaths.agent_dir / "sessions").as_posix()
 
         setup_command = (
@@ -1327,11 +1640,19 @@ class ClaudeCode(BaseInstalledAgent):
         cli_flags = self.build_cli_flags()
         extra_flags = (cli_flags + " ") if cli_flags else ""
 
+        use_cli_proxy_system_shim = self._configure_cli_proxy_system_shim_env(env)
+
         await self.exec_as_agent(
             environment,
             command=setup_command,
             env=env,
         )
+        if use_cli_proxy_system_shim:
+            await self.exec_as_agent(
+                environment,
+                command=self._build_cli_proxy_system_shim_command(),
+                env=env,
+            )
         await self.exec_as_agent(
             environment,
             command=(
