@@ -1,3 +1,5 @@
+import json
+import sqlite3
 from pathlib import Path
 
 from pier.agents.factory import AgentFactory
@@ -28,7 +30,9 @@ def test_mastra_code_install_spec_uses_headless_cli(tmp_path: Path):
 
     assert spec.agent_name == "mastra-code"
     assert any("npm install -g mastracode@0.15.2" in step.run for step in spec.steps)
+    assert any("Node.js 22.13.0+ required" in step.run for step in spec.steps)
     assert spec.verification_command is not None
+    assert "Node.js 22.13.0+ required" in spec.verification_command
     assert "mastracode --help" in spec.verification_command
     assert "--thinking-level high" in agent._build_headless_flags()
     assert "--model openai/gpt-5.5" in agent._build_headless_flags()
@@ -45,6 +49,49 @@ def test_mastra_code_proxy_suffix_maps_to_runtime_thinking_level(tmp_path: Path)
     assert agent._proxy_target_model_name() == "gpt-5.5(low)"
     assert "--thinking-level xhigh" in agent._build_headless_flags()
     assert "--model openai/gpt-5.5" in agent._build_headless_flags()
+    assert "--resource-id pier-" in agent._build_headless_flags()
+    assert "--title pier-" in agent._build_headless_flags()
+
+
+def test_mastra_code_runtime_env_uses_benchmark_local_storage(tmp_path: Path):
+    agent = MastraCode(
+        logs_dir=tmp_path,
+        model_name="openai/gpt-5.5",
+        extra_env={"CLI_PROXY_API_KEY": "test-key"},
+    )
+
+    env = agent._build_runtime_env()
+
+    assert env["OPENAI_API_KEY"] == "test-key"
+    assert env["MASTRA_STORAGE_BACKEND"] == "libsql"
+    assert env["MASTRA_DB_PATH"] == "/logs/agent/mastra-code.db"
+    assert env["MASTRA_DB_URL"] == "file:/logs/agent/mastra-code.db"
+    assert env["MASTRA_OBSERVABILITY_DB_PATH"] == (
+        "/logs/agent/mastra-code-observability.duckdb"
+    )
+    assert env["MASTRA_RESOURCE_ID"].startswith("pier-")
+    assert env["MASTRA_USER_ID"] == "pier-agent"
+    assert env["MASTRA_TELEMETRY_DISABLED"] == "1"
+
+
+def test_mastra_code_runtime_env_preserves_explicit_storage(tmp_path: Path):
+    agent = MastraCode(
+        logs_dir=tmp_path,
+        model_name="openai/gpt-5.5",
+        extra_env={
+            "MASTRA_DB_PATH": "/custom/mastra.db",
+            "MASTRA_DB_URL": "libsql://example.invalid",
+            "MASTRA_RESOURCE_ID": "custom-resource",
+            "MASTRA_USER_ID": "custom-user",
+        },
+    )
+
+    env = agent._build_runtime_env()
+
+    assert env["MASTRA_DB_PATH"] == "/custom/mastra.db"
+    assert env["MASTRA_DB_URL"] == "libsql://example.invalid"
+    assert env["MASTRA_RESOURCE_ID"] == "custom-resource"
+    assert env["MASTRA_USER_ID"] == "custom-user"
 
 
 def test_mastra_code_proxy_suffix_configures_model_shim(tmp_path: Path):
@@ -116,10 +163,50 @@ def test_mastra_code_custom_provider_settings_command_uses_runtime_env():
     assert "globalSettingsPath" in command
     assert "providerUrl" in command
     assert "url: providerUrl" in command
+    assert "activeOmPackId: 'custom'" in command
+    assert "observerModel = process.env.PIER_MASTRA_CODE_OBSERVER_MODEL" in command
+    assert "gpt-5.4-mini" in command
+    assert "providerObserverModel" in command
+    assert "observerModelOverride: providerObserverModel" in command
+    assert "reflectorModelOverride: providerModel" in command
+    assert "PIER_MASTRA_CODE_OM_OBSERVATION_THRESHOLD" in command
+    assert "PIER_MASTRA_CODE_OM_REFLECTION_THRESHOLD" in command
+    assert "omObservationThreshold" in command
+    assert "omReflectionThreshold" in command
     assert "upstreamHostMapped" in command
     assert "process.env.OPENAI_API_KEY || process.env.CLI_PROXY_API_KEY" in command
     assert "apiKey: process.env" not in command
     assert "custom_provider_settings" in command
+
+
+def test_mastra_code_hook_ipc_observer_command_installs_global_hooks():
+    command = MastraCode._build_hook_ipc_observer_command()
+
+    assert "node /tmp/pier-mastra-code-hook-ipc.js listen" in command
+    assert "node /tmp/pier-mastra-code-hook-ipc.js emit" in command
+    assert "require(\"os\").homedir()+\"/.mastracode\"" in command
+    assert "$HOOK_CONFIG_DIR/hooks.json" in command
+    assert "$PROJECT_HOOK_CONFIG_DIR/hooks.json" in command
+    assert "mastra-code-hook-config.json" in command
+    assert "mastra-code-hooks.jsonl" in command
+    assert "mastra-code-hook-ipc.log" in command
+    assert "PreToolUse" in command
+    assert "PostToolUse" in command
+    assert "UserPromptSubmit" in command
+    assert "SessionEnd" in command
+
+
+def test_mastra_code_stream_capture_command_uses_bounded_compact_artifacts():
+    command = MastraCode._build_stream_capture_command()
+
+    assert "node -c /tmp/pier-mastra-code-stream-capture.js" in command
+    assert "mastra-code-events.jsonl" in command
+    assert "mastra-code-console.log" in command
+    assert "mastra-code-stream-summary.json" in command
+    assert "maxLineChars" in command
+    assert "display_state_changed" in command
+    assert "tool_input_delta" in command
+    assert "keptEventCounts" in command
 
 
 def test_mastra_code_proxy_model_shim_command_uses_node():
@@ -163,6 +250,63 @@ def test_mastra_code_maps_cli_proxy_key_to_openai_key(tmp_path: Path):
 
     assert env["CLI_PROXY_API_KEY"] == "test-key"
     assert env["OPENAI_API_KEY"] == "test-key"
+
+
+def test_mastra_code_parse_stdout_prefers_compact_events(tmp_path: Path):
+    agent = MastraCode(logs_dir=tmp_path, model_name="openai/gpt-5.5")
+    (tmp_path / "mastra-code-events.jsonl").write_text(
+        '{"type":"agent_end","reason":"complete"}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "mastra-code.txt").write_text(
+        '{"type":"tool_start","toolName":"legacy"}\n',
+        encoding="utf-8",
+    )
+
+    events = agent._parse_stdout()
+
+    assert events == [{"type": "agent_end", "reason": "complete"}]
+
+
+def test_mastra_code_parse_stdout_streams_legacy_invalid_utf8(tmp_path: Path):
+    agent = MastraCode(logs_dir=tmp_path, model_name="openai/gpt-5.5")
+    (tmp_path / "mastra-code.txt").write_bytes(
+        b'{"type":"tool_end","toolCallId":"tool-1","isError":false}\n'
+        b'{"type":"error","message":"truncated \xe2'
+    )
+
+    events = agent._parse_stdout()
+
+    assert events == [
+        {"type": "tool_end", "toolCallId": "tool-1", "isError": False}
+    ]
+    assert "truncated" in agent._read_stdout()
+
+
+def test_mastra_code_writes_queryable_sqlite_events(tmp_path: Path):
+    agent = MastraCode(logs_dir=tmp_path, model_name="openai/gpt-5.5")
+    events = [
+        {"type": "tool_start", "toolName": "view"},
+        {"type": "agent_end", "reason": "complete"},
+    ]
+
+    agent._write_events_sqlite(events)
+
+    db_path = tmp_path / "mastra-code-events.sqlite"
+    assert db_path.exists()
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT event_type, payload_json FROM mastra_events ORDER BY id"
+        ).fetchall()
+        counts = dict(
+            conn.execute(
+                "SELECT event_type, count FROM mastra_event_counts ORDER BY event_type"
+            ).fetchall()
+        )
+
+    assert rows[0][0] == "tool_start"
+    assert json.loads(rows[0][1]) == {"type": "tool_start", "toolName": "view"}
+    assert counts == {"agent_end": 1, "tool_start": 1}
 
 
 def test_mastra_code_converts_stream_json_to_atif(tmp_path: Path):

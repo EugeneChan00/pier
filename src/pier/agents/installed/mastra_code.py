@@ -2,6 +2,7 @@ import json
 import re
 import shlex
 import socket
+import sqlite3
 from typing import Any, Literal
 from urllib.parse import urlparse
 
@@ -41,14 +42,30 @@ class MastraCode(BaseInstalledAgent):
     SUPPORTS_ATIF: bool = True
 
     _OUTPUT_FILENAME = "mastra-code.txt"
+    _EVENTS_FILENAME = "mastra-code-events.jsonl"
+    _EVENT_DB_FILENAME = "mastra-code-events.sqlite"
+    _STREAM_SUMMARY_FILENAME = "mastra-code-stream-summary.json"
+    _CONSOLE_LOG_FILENAME = "mastra-code-console.log"
+    _STREAM_CAPTURE_SCRIPT_PATH = "/tmp/pier-mastra-code-stream-capture.js"
     _MODES = {"build", "plan", "fast"}
     _THINKING_LEVELS = {"off", "low", "medium", "high", "xhigh"}
     _CLI_PROXY_PROVIDER_ID = "cli-proxy"
     _CLI_PROXY_PROVIDER_NAME = "CLI Proxy"
     _CLI_PROXY_SETTINGS_PATH = "/tmp/pier-mastra-code-cli-proxy-settings.json"
+    _HOOK_IPC_SCRIPT_PATH = "/tmp/pier-mastra-code-hook-ipc.js"
+    _HOOK_IPC_SOCKET_PATH = "/tmp/pier-mastra-code-hooks.sock"
+    _HOOK_IPC_READY_PATH = "/tmp/pier-mastra-code-hooks.ready"
+    _HOOK_EVENTS_FILENAME = "mastra-code-hooks.jsonl"
+    _HOOK_LOG_FILENAME = "mastra-code-hook-ipc.log"
     _MODEL_SUFFIX_SHIM_PORT = 18766
     _PROXY_SUFFIX_RE = re.compile(
         r"^(?P<base>.+)\((?P<level>low|medium|high|xhigh)\)$"
+    )
+    _NODE_VERSION_CHECK_COMMAND = (
+        "node -e 'const v=process.versions.node.split(\".\").map(Number); "
+        "if (v[0] < 22 || (v[0] === 22 && v[1] < 13)) { "
+        "console.error(\"Node.js 22.13.0+ required, found \" + "
+        "process.versions.node); process.exit(1); }'"
     )
     _DEFAULT_DOMAINS = [
         "api.openai.com",
@@ -81,16 +98,27 @@ class MastraCode(BaseInstalledAgent):
         "GOOGLE_GENERATIVE_AI_API_KEY",
         "GOOGLE_GENAI_USE_VERTEXAI",
         "MASTRA_API_KEY",
+        "MASTRA_DB_AUTH_TOKEN",
+        "MASTRA_DB_PATH",
+        "MASTRA_DB_URL",
+        "MASTRA_OBSERVABILITY_DB_PATH",
         "MASTRA_GATEWAY_BASE_URL",
         "MASTRA_GATEWAY_URL",
+        "MASTRA_RESOURCE_ID",
+        "MASTRA_STORAGE_BACKEND",
+        "MASTRA_TELEMETRY_DISABLED",
+        "MASTRA_USER_ID",
         "OPENAI_API_BASE",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENROUTER_API_KEY",
-            "MASTRA_CODE_CLI_PROXY_CUSTOM_PROVIDER",
-            "PIER_MASTRA_CODE_CUSTOM_PROVIDER_BASE_URL",
-            "PIER_MASTRA_CODE_UPSTREAM_BASE_URL",
-        ]
+        "MASTRA_CODE_CLI_PROXY_CUSTOM_PROVIDER",
+        "PIER_MASTRA_CODE_OM_OBSERVATION_THRESHOLD",
+        "PIER_MASTRA_CODE_OM_REFLECTION_THRESHOLD",
+        "PIER_MASTRA_CODE_OBSERVER_MODEL",
+        "PIER_MASTRA_CODE_CUSTOM_PROVIDER_BASE_URL",
+        "PIER_MASTRA_CODE_UPSTREAM_BASE_URL",
+    ]
 
     def __init__(
         self,
@@ -128,8 +156,16 @@ class MastraCode(BaseInstalledAgent):
     def _nvm_prefix() -> str:
         return 'if [ -s ~/.nvm/nvm.sh ]; then . ~/.nvm/nvm.sh; fi; '
 
+    @classmethod
+    def _node_version_check_command(cls) -> str:
+        return cls._NODE_VERSION_CHECK_COMMAND
+
     def get_version_command(self) -> str | None:
-        return self._nvm_prefix() + "mastracode --help >/dev/null && mastracode --version"
+        return (
+            self._nvm_prefix()
+            + self._node_version_check_command()
+            + " && mastracode --help >/dev/null && mastracode --version"
+        )
 
     def parse_version(self, stdout: str) -> str:
         return stdout.strip().splitlines()[-1].strip() if stdout.strip() else ""
@@ -150,15 +186,18 @@ class MastraCode(BaseInstalledAgent):
         agent_run = (
             "set -euo pipefail; "
             "if command -v apk &> /dev/null; then"
-            f"  npm install -g mastracode{version_spec};"
+            f"  {self._node_version_check_command()} && "
+            f"npm install -g mastracode{version_spec};"
             " else"
             "  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.2/install.sh | bash && "
             'export NVM_DIR="$HOME/.nvm" && '
             '\\. "$NVM_DIR/nvm.sh" || true && '
             "command -v nvm &>/dev/null || { echo 'Error: NVM failed to load' >&2; exit 1; } && "
             "nvm install 22 && "
+            f"{self._node_version_check_command()} && "
             f"npm install -g mastracode{version_spec};"
             " fi && "
+            f"{self._node_version_check_command()} && "
             "mastracode --help >/dev/null"
         )
 
@@ -173,7 +212,11 @@ class MastraCode(BaseInstalledAgent):
                 ),
                 InstallStep(user="agent", run=agent_run),
             ],
-            verification_command=self._nvm_prefix() + "mastracode --help >/dev/null",
+            verification_command=(
+                self._nvm_prefix()
+                + self._node_version_check_command()
+                + " && mastracode --help >/dev/null"
+            ),
         )
 
     def network_allowlist(self) -> NetworkAllowlist:
@@ -186,7 +229,32 @@ class MastraCode(BaseInstalledAgent):
         )
         if "OPENAI_API_KEY" not in env and "CLI_PROXY_API_KEY" in env:
             env["OPENAI_API_KEY"] = env["CLI_PROXY_API_KEY"]
-        return {key: value for key, value in env.items() if value}
+        env = {key: value for key, value in env.items() if value}
+        self._configure_benchmark_runtime_env(env)
+        return env
+
+    def _run_resource_id(self) -> str:
+        name = (
+            self.logs_dir.parent.name
+            if self.logs_dir.name == "agent"
+            else self.logs_dir.name
+        )
+        safe = re.sub(r"[^A-Za-z0-9_.:-]+", "-", name).strip("-")
+        return f"pier-{safe or 'mastra-code'}"[:128]
+
+    def _configure_benchmark_runtime_env(self, env: dict[str, str]) -> None:
+        agent_dir = EnvironmentPaths.agent_dir.as_posix()
+        resource_id = self._run_resource_id()
+        db_path = env.setdefault("MASTRA_DB_PATH", f"{agent_dir}/mastra-code.db")
+        env.setdefault("MASTRA_STORAGE_BACKEND", "libsql")
+        env.setdefault("MASTRA_DB_URL", f"file:{db_path}")
+        env.setdefault(
+            "MASTRA_OBSERVABILITY_DB_PATH",
+            f"{agent_dir}/mastra-code-observability.duckdb",
+        )
+        env.setdefault("MASTRA_RESOURCE_ID", resource_id)
+        env.setdefault("MASTRA_USER_ID", "pier-agent")
+        env.setdefault("MASTRA_TELEMETRY_DISABLED", "1")
 
     def _runtime_model_and_thinking_level(
         self, use_cli_proxy_custom_provider: bool = False
@@ -354,6 +422,10 @@ const providerName = process.env.PIER_MASTRA_CODE_CUSTOM_PROVIDER_NAME || 'CLI P
 const providerId = process.env.PIER_MASTRA_CODE_CUSTOM_PROVIDER_ID || 'cli-proxy';
 const model = process.env.PIER_MASTRA_CODE_PROXY_MODEL || '';
 const providerModel = `${providerId}/${model}`;
+const observerModel = process.env.PIER_MASTRA_CODE_OBSERVER_MODEL || 'gpt-5.4-mini';
+const providerObserverModel = `${providerId}/${observerModel}`;
+const omObservationThreshold = Number.parseInt(process.env.PIER_MASTRA_CODE_OM_OBSERVATION_THRESHOLD || '1000000000', 10);
+const omReflectionThreshold = Number.parseInt(process.env.PIER_MASTRA_CODE_OM_REFLECTION_THRESHOLD || '1000000000', 10);
 const apiKey = process.env.OPENAI_API_KEY || process.env.CLI_PROXY_API_KEY || '';
 const upstreamHost = process.env.PIER_MASTRA_CODE_UPSTREAM_HOST || '';
 const upstreamHostIp = process.env.PIER_MASTRA_CODE_UPSTREAM_HOST_IP || '';
@@ -392,7 +464,7 @@ const settings = {
       name: providerName,
       url: providerUrl,
       apiKey,
-      models: [model],
+      models: [...new Set([model, observerModel])],
     },
   ],
   customModelPacks: [
@@ -408,6 +480,12 @@ const settings = {
   ],
   models: {
     activeModelPackId: 'custom:pier-cli-proxy',
+    activeOmPackId: 'custom',
+    omModelOverride: providerObserverModel,
+    observerModelOverride: providerObserverModel,
+    reflectorModelOverride: providerModel,
+    omObservationThreshold,
+    omReflectionThreshold,
     modeDefaults: {
       build: providerModel,
       plan: providerModel,
@@ -433,6 +511,10 @@ console.error(JSON.stringify({
   providerUrl,
   model,
   providerModel,
+  observerModel,
+  providerObserverModel,
+  omObservationThreshold,
+  omReflectionThreshold,
   settingsPath,
   globalSettingsPath,
   upstreamHost,
@@ -663,6 +745,8 @@ server.listen(port, '127.0.0.1', () => {{
             parts.extend(["--mode", self._mode])
         if self._timeout is not None:
             parts.extend(["--timeout", str(self._timeout)])
+        parts.extend(["--resource-id", self._run_resource_id()])
+        parts.extend(["--title", self._run_resource_id()])
         settings = (
             self._CLI_PROXY_SETTINGS_PATH
             if use_cli_proxy_custom_provider
@@ -671,6 +755,433 @@ server.listen(port, '127.0.0.1', () => {{
         if settings:
             parts.extend(["--settings", settings])
         return " ".join(shlex.quote(part) for part in parts)
+
+    @classmethod
+    def _build_hook_ipc_observer_command(cls) -> str:
+        agent_dir = EnvironmentPaths.agent_dir.as_posix()
+        events_path = f"{agent_dir}/{cls._HOOK_EVENTS_FILENAME}"
+        log_path = f"{agent_dir}/{cls._HOOK_LOG_FILENAME}"
+        script_path = cls._HOOK_IPC_SCRIPT_PATH
+        socket_path = cls._HOOK_IPC_SOCKET_PATH
+        ready_path = cls._HOOK_IPC_READY_PATH
+        script = r"""
+const fs = require('fs');
+const net = require('net');
+
+const mode = process.argv[2] || '';
+const socketPath = process.env.PIER_MASTRA_CODE_HOOK_SOCKET || '/tmp/pier-mastra-code-hooks.sock';
+const eventsPath = process.env.PIER_MASTRA_CODE_HOOK_EVENTS || '/logs/agent/mastra-code-hooks.jsonl';
+const readyPath = process.env.PIER_MASTRA_CODE_HOOK_READY || '/tmp/pier-mastra-code-hooks.ready';
+
+function append(record) {
+  fs.mkdirSync(require('path').dirname(eventsPath), { recursive: true });
+  fs.appendFileSync(eventsPath, JSON.stringify(record) + '\n', 'utf8');
+}
+
+function readStdin() {
+  return new Promise((resolve) => {
+    const chunks = [];
+    process.stdin.on('data', (chunk) => chunks.push(chunk));
+    process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+  });
+}
+
+async function emit() {
+  const raw = await readStdin();
+  let payload;
+  try {
+    payload = raw.trim() ? JSON.parse(raw) : {};
+  } catch (error) {
+    payload = { parseError: error.message, raw };
+  }
+  const record = {
+    type: 'mastra_hook',
+    observedAt: new Date().toISOString(),
+    pid: process.pid,
+    payload,
+  };
+  const client = net.createConnection(socketPath);
+  client.on('error', () => {
+    append({ ...record, fallback: true });
+    process.exit(0);
+  });
+  client.on('connect', () => {
+    client.end(JSON.stringify(record) + '\n');
+  });
+  client.on('close', () => process.exit(0));
+}
+
+function listen() {
+  try { fs.unlinkSync(socketPath); } catch {}
+  try { fs.unlinkSync(readyPath); } catch {}
+  fs.mkdirSync(require('path').dirname(eventsPath), { recursive: true });
+  fs.writeFileSync(eventsPath, '', { flag: 'a' });
+  const server = net.createServer((socket) => {
+    let buffer = '';
+    socket.on('data', (chunk) => buffer += chunk.toString('utf8'));
+    socket.on('end', () => {
+      for (const line of buffer.split('\n')) {
+        if (!line.trim()) continue;
+        try {
+          append(JSON.parse(line));
+        } catch (error) {
+          append({ type: 'mastra_hook_parse_error', observedAt: new Date().toISOString(), error: error.message, raw: line });
+        }
+      }
+    });
+  });
+  server.listen(socketPath, () => {
+    fs.writeFileSync(readyPath, String(process.pid));
+  });
+}
+
+if (mode === 'emit') emit();
+else if (mode === 'listen') listen();
+else {
+  process.stderr.write('usage: node pier-mastra-code-hook-ipc.js <listen|emit>\n');
+  process.exit(2);
+}
+"""
+        hook_command = f"{cls._nvm_prefix()}node {script_path} emit"
+        hooks = {
+            event: [
+                {
+                    "type": "command",
+                    "command": hook_command,
+                    "timeout": 5000,
+                    "description": "Pier Mastra Code hook event capture",
+                }
+            ]
+            for event in [
+                "PreToolUse",
+                "PostToolUse",
+                "Stop",
+                "UserPromptSubmit",
+                "SessionStart",
+                "SessionEnd",
+                "Notification",
+            ]
+        }
+        hooks_json = json.dumps(hooks, indent=2)
+        escaped_script = script.strip() + "\n"
+        return (
+            f"HOOK_CONFIG_DIR=\"$({cls._nvm_prefix()}"
+            "node -e 'process.stdout.write(require(\"os\").homedir()+\"/.mastracode\")')\" && "
+            "PROJECT_ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" && "
+            "PROJECT_HOOK_CONFIG_DIR=\"$PROJECT_ROOT/.mastracode\" && "
+            f"mkdir -p {agent_dir} \"$HOOK_CONFIG_DIR\" \"$PROJECT_HOOK_CONFIG_DIR\" && "
+            f"cat > {script_path} <<'PIER_MASTRA_CODE_HOOK_IPC'\n"
+            f"{escaped_script}"
+            "PIER_MASTRA_CODE_HOOK_IPC\n"
+            f"cat > \"$HOOK_CONFIG_DIR/hooks.json\" <<'PIER_MASTRA_CODE_HOOKS'\n"
+            f"{hooks_json}\n"
+            "PIER_MASTRA_CODE_HOOKS\n"
+            "cp \"$HOOK_CONFIG_DIR/hooks.json\" \"$PROJECT_HOOK_CONFIG_DIR/hooks.json\" && "
+            "printf '{\"global\":\"%s\",\"project\":\"%s\"}\\n' "
+            "\"$HOOK_CONFIG_DIR/hooks.json\" "
+            f"\"$PROJECT_HOOK_CONFIG_DIR/hooks.json\" > {agent_dir}/mastra-code-hook-config.json && "
+            f"rm -f {socket_path} {ready_path} && "
+            f"{cls._nvm_prefix()}"
+            f"PIER_MASTRA_CODE_HOOK_SOCKET={socket_path} "
+            f"PIER_MASTRA_CODE_HOOK_EVENTS={events_path} "
+            f"PIER_MASTRA_CODE_HOOK_READY={ready_path} "
+            f"node {script_path} listen > {log_path} 2>&1 & "
+            f"for i in $(seq 1 50); do "
+            f"  [ -S {socket_path} ] && [ -f {ready_path} ] && exit 0; "
+            "  sleep 0.1; "
+            "done; "
+            f"cat {log_path} >&2 || true; "
+            "exit 1"
+        )
+
+    @classmethod
+    def _build_stream_capture_command(cls) -> str:
+        agent_dir = EnvironmentPaths.agent_dir.as_posix()
+        script_path = cls._STREAM_CAPTURE_SCRIPT_PATH
+        events_path = f"{agent_dir}/{cls._EVENTS_FILENAME}"
+        console_path = f"{agent_dir}/{cls._CONSOLE_LOG_FILENAME}"
+        summary_path = f"{agent_dir}/{cls._STREAM_SUMMARY_FILENAME}"
+        script = r"""
+const fs = require('fs');
+const path = require('path');
+const { StringDecoder } = require('string_decoder');
+
+const eventsPath = process.env.PIER_MASTRA_CODE_EVENTS || '/logs/agent/mastra-code-events.jsonl';
+const consolePath = process.env.PIER_MASTRA_CODE_CONSOLE || '/logs/agent/mastra-code-console.log';
+const summaryPath = process.env.PIER_MASTRA_CODE_STREAM_SUMMARY || '/logs/agent/mastra-code-stream-summary.json';
+const consoleByteLimit = Number.parseInt(process.env.PIER_MASTRA_CODE_CONSOLE_BYTES || '2097152', 10);
+const maxLineChars = Number.parseInt(process.env.PIER_MASTRA_CODE_MAX_LINE_CHARS || '2097152', 10);
+const maxStringChars = Number.parseInt(process.env.PIER_MASTRA_CODE_MAX_STRING_CHARS || '120000', 10);
+const maxObjectKeys = Number.parseInt(process.env.PIER_MASTRA_CODE_MAX_OBJECT_KEYS || '80', 10);
+const maxArrayItems = Number.parseInt(process.env.PIER_MASTRA_CODE_MAX_ARRAY_ITEMS || '80', 10);
+const maxDepth = Number.parseInt(process.env.PIER_MASTRA_CODE_MAX_DEPTH || '8', 10);
+
+const keepEventTypes = new Set([
+  'agent_start',
+  'agent_end',
+  'error',
+  'message_end',
+  'om_buffering_failed',
+  'om_observation_end',
+  'om_observation_start',
+  'om_status',
+  'thread_created',
+  'tool_end',
+  'tool_start',
+  'usage_update',
+  'warning',
+]);
+
+const skippedEventTypes = new Set([
+  'display_state_changed',
+  'message_delta',
+  'message_start',
+  'message_update',
+  'thinking_delta',
+  'thinking_update',
+  'tool_input_delta',
+  'tool_input_end',
+  'tool_input_start',
+  'tool_input_update',
+]);
+
+function ensureDir(filePath) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+}
+
+ensureDir(eventsPath);
+ensureDir(consolePath);
+ensureDir(summaryPath);
+fs.writeFileSync(eventsPath, '', 'utf8');
+fs.writeFileSync(consolePath, '', 'utf8');
+
+const eventsStream = fs.createWriteStream(eventsPath, { flags: 'a' });
+const consoleStream = fs.createWriteStream(consolePath, { flags: 'a' });
+const decoder = new StringDecoder('utf8');
+const startedAt = new Date().toISOString();
+const eventCounts = {};
+const keptEventCounts = {};
+const skippedEventCounts = {};
+let buffer = '';
+let droppingOversizedLine = false;
+let consoleBytes = 0;
+let totalLines = 0;
+let jsonLines = 0;
+let keptEvents = 0;
+let skippedEvents = 0;
+let nonJsonLines = 0;
+let invalidJsonLines = 0;
+let oversizedLines = 0;
+let finished = false;
+
+function count(counter, key) {
+  const normalized = key || 'unknown';
+  counter[normalized] = (counter[normalized] || 0) + 1;
+}
+
+function appendConsole(text) {
+  if (consoleBytes >= consoleByteLimit) return;
+  const line = Buffer.from(`${text}\n`, 'utf8');
+  const remaining = consoleByteLimit - consoleBytes;
+  if (line.length <= remaining) {
+    consoleStream.write(line);
+    consoleBytes += line.length;
+    return;
+  }
+  consoleStream.write(line.subarray(0, remaining));
+  consoleBytes += remaining;
+}
+
+function truncateString(value) {
+  if (value.length <= maxStringChars) return value;
+  return `${value.slice(0, maxStringChars)}...[truncated ${value.length - maxStringChars} chars]`;
+}
+
+function compactValue(value, depth = 0) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') return truncateString(value);
+  if (typeof value !== 'object') return value;
+  if (depth >= maxDepth) {
+    return Array.isArray(value) ? `[array:${value.length}]` : '[object]';
+  }
+  if (Array.isArray(value)) {
+    const compact = value.slice(0, maxArrayItems).map((item) => compactValue(item, depth + 1));
+    if (value.length > maxArrayItems) {
+      compact.push(`[truncated ${value.length - maxArrayItems} items]`);
+    }
+    return compact;
+  }
+
+  const compact = {};
+  const entries = Object.entries(value);
+  for (const [key, item] of entries.slice(0, maxObjectKeys)) {
+    compact[key] = compactValue(item, depth + 1);
+  }
+  if (entries.length > maxObjectKeys) {
+    compact.__truncatedKeys = entries.length - maxObjectKeys;
+  }
+  return compact;
+}
+
+function shouldKeepEvent(event, eventType) {
+  if (keepEventTypes.has(eventType)) return true;
+  if (skippedEventTypes.has(eventType)) return false;
+  if (event.error || event.isError || String(eventType).includes('error')) return true;
+  return false;
+}
+
+function mirrorEvent(event, compact) {
+  const eventType = String(event.type || 'unknown');
+  if (eventType === 'error' || eventType === 'agent_end' || event.isError) {
+    process.stdout.write(`${JSON.stringify(compact)}\n`);
+  }
+}
+
+function processLine(line) {
+  totalLines += 1;
+  const trimmed = line.trim();
+  if (!trimmed) return;
+  if (!trimmed.startsWith('{')) {
+    nonJsonLines += 1;
+    appendConsole(trimmed);
+    return;
+  }
+
+  let event;
+  try {
+    event = JSON.parse(trimmed);
+  } catch (error) {
+    invalidJsonLines += 1;
+    appendConsole(JSON.stringify({ type: 'invalid_json_line', error: error.message, line: truncateString(trimmed) }));
+    return;
+  }
+  if (!event || typeof event !== 'object' || Array.isArray(event)) {
+    nonJsonLines += 1;
+    return;
+  }
+
+  jsonLines += 1;
+  const eventType = String(event.type || 'unknown');
+  count(eventCounts, eventType);
+  if (!shouldKeepEvent(event, eventType)) {
+    skippedEvents += 1;
+    count(skippedEventCounts, eventType);
+    return;
+  }
+
+  const compact = compactValue(event);
+  keptEvents += 1;
+  count(keptEventCounts, eventType);
+  eventsStream.write(`${JSON.stringify(compact)}\n`);
+  mirrorEvent(event, compact);
+}
+
+function handleText(text) {
+  let start = 0;
+  while (start < text.length) {
+    const newline = text.indexOf('\n', start);
+    if (newline === -1) break;
+    const segment = text.slice(start, newline).replace(/\r$/, '');
+    if (droppingOversizedLine) {
+      droppingOversizedLine = false;
+    } else {
+      buffer += segment;
+      processLine(buffer);
+    }
+    buffer = '';
+    start = newline + 1;
+  }
+
+  if (start >= text.length) return;
+  if (droppingOversizedLine) return;
+  buffer += text.slice(start);
+  if (buffer.length > maxLineChars) {
+    oversizedLines += 1;
+    appendConsole(JSON.stringify({
+      type: 'oversized_stream_line_dropped',
+      maxLineChars,
+      observedChars: buffer.length,
+    }));
+    buffer = '';
+    droppingOversizedLine = true;
+  }
+}
+
+function writeSummary() {
+  const summary = {
+    type: 'mastra_code_stream_summary',
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    eventsPath,
+    consolePath,
+    totalLines,
+    jsonLines,
+    keptEvents,
+    skippedEvents,
+    nonJsonLines,
+    invalidJsonLines,
+    oversizedLines,
+    consoleBytes,
+    eventCounts,
+    keptEventCounts,
+    skippedEventCounts,
+  };
+  fs.writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8');
+  process.stdout.write(`${JSON.stringify(summary)}\n`);
+}
+
+function finish() {
+  if (finished) return;
+  finished = true;
+  if (!droppingOversizedLine && buffer) {
+    processLine(buffer);
+  }
+  buffer = '';
+  writeSummary();
+  eventsStream.end();
+  consoleStream.end();
+}
+
+process.stdin.on('data', (chunk) => handleText(decoder.write(chunk)));
+process.stdin.on('end', () => {
+  const tail = decoder.end();
+  if (tail) handleText(tail);
+  finish();
+});
+process.stdin.on('error', (error) => {
+  appendConsole(JSON.stringify({ type: 'stdin_error', error: error.message }));
+  process.exitCode = 1;
+  finish();
+});
+process.on('uncaughtException', (error) => {
+  appendConsole(JSON.stringify({ type: 'stream_capture_uncaught_exception', error: error.message, stack: error.stack }));
+  process.exitCode = 1;
+  finish();
+});
+"""
+        escaped_script = script.strip() + "\n"
+        return (
+            f"mkdir -p {agent_dir} && "
+            f"cat > {script_path} <<'PIER_MASTRA_CODE_STREAM_CAPTURE'\n"
+            f"{escaped_script}"
+            "PIER_MASTRA_CODE_STREAM_CAPTURE\n"
+            f"{cls._nvm_prefix()}"
+            f"PIER_MASTRA_CODE_EVENTS={events_path} "
+            f"PIER_MASTRA_CODE_CONSOLE={console_path} "
+            f"PIER_MASTRA_CODE_STREAM_SUMMARY={summary_path} "
+            f"node -c {script_path} && "
+            f": > {events_path} && : > {console_path}"
+        )
+
+    @classmethod
+    def _stream_capture_invocation(cls) -> str:
+        agent_dir = EnvironmentPaths.agent_dir.as_posix()
+        return (
+            f"PIER_MASTRA_CODE_EVENTS={agent_dir}/{cls._EVENTS_FILENAME} "
+            f"PIER_MASTRA_CODE_CONSOLE={agent_dir}/{cls._CONSOLE_LOG_FILENAME} "
+            f"PIER_MASTRA_CODE_STREAM_SUMMARY={agent_dir}/{cls._STREAM_SUMMARY_FILENAME} "
+            f"node {cls._STREAM_CAPTURE_SCRIPT_PATH}"
+        )
 
     @staticmethod
     def _has_successful_tool_end(events: list[dict[str, Any]]) -> bool:
@@ -704,16 +1215,55 @@ server.listen(port, '127.0.0.1', () => {{
 
         return bool(raw_output) and cls._text_has_store_false_error(raw_output)
 
-    def _read_stdout(self) -> str:
-        output_path = self.logs_dir / self._OUTPUT_FILENAME
-        if not output_path.exists():
+    def _stream_event_path(self):
+        for filename in [self._EVENTS_FILENAME, self._OUTPUT_FILENAME]:
+            path = self.logs_dir / filename
+            try:
+                if path.stat().st_size > 0:
+                    return path
+            except OSError:
+                continue
+        return None
+
+    def _iter_stdout_lines(self):
+        output_path = self._stream_event_path()
+        if output_path is None:
+            return
+
+        try:
+            with output_path.open(encoding="utf-8", errors="replace") as stream:
+                yield from stream
+        except OSError as exc:
+            self.logger.debug(f"Failed to read Mastra Code stream {output_path}: {exc}")
+
+    @staticmethod
+    def _read_text_tail(path, max_bytes: int = 1_048_576) -> str:
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as stream:
+                if size > max_bytes:
+                    stream.seek(size - max_bytes)
+                return stream.read(max_bytes).decode("utf-8", errors="replace")
+        except OSError:
             return ""
 
-        return output_path.read_text(encoding="utf-8")
+    def _read_stdout(self) -> str:
+        chunks: list[str] = []
+        for filename in [
+            self._CONSOLE_LOG_FILENAME,
+            self._EVENTS_FILENAME,
+            self._OUTPUT_FILENAME,
+        ]:
+            path = self.logs_dir / filename
+            if path.exists():
+                tail = self._read_text_tail(path)
+                if tail:
+                    chunks.append(tail)
+        return "\n".join(chunks)
 
     def _parse_stdout(self) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
-        for line in self._read_stdout().splitlines():
+        for line in self._iter_stdout_lines() or []:
             line = line.strip()
             if not line or not line.startswith("{"):
                 continue
@@ -724,6 +1274,47 @@ server.listen(port, '127.0.0.1', () => {{
             if isinstance(event, dict):
                 events.append(event)
         return events
+
+    def _write_events_sqlite(self, events: list[dict[str, Any]]) -> None:
+        if not events:
+            return
+
+        db_path = self.logs_dir / self._EVENT_DB_FILENAME
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS mastra_events (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_type TEXT NOT NULL,
+                        payload_json TEXT NOT NULL
+                    )
+                    """
+                )
+                conn.execute("DELETE FROM mastra_events")
+                conn.executemany(
+                    """
+                    INSERT INTO mastra_events (event_type, payload_json)
+                    VALUES (?, ?)
+                    """,
+                    [
+                        (
+                            str(event.get("type") or "unknown"),
+                            json.dumps(event, ensure_ascii=False),
+                        )
+                        for event in events
+                    ],
+                )
+                conn.execute(
+                    """
+                    CREATE VIEW IF NOT EXISTS mastra_event_counts AS
+                    SELECT event_type, COUNT(*) AS count
+                    FROM mastra_events
+                    GROUP BY event_type
+                    """
+                )
+        except (OSError, sqlite3.Error) as exc:
+            self.logger.debug(f"Failed to write Mastra Code SQLite events: {exc}")
 
     @classmethod
     def _extract_message_text(cls, message: Any) -> str:
@@ -900,6 +1491,7 @@ server.listen(port, '127.0.0.1', () => {{
         events = self._parse_stdout()
         if not events:
             return
+        self._write_events_sqlite(events)
 
         try:
             trajectory = self._convert_events_to_trajectory(events, instruction="")
@@ -943,14 +1535,13 @@ server.listen(port, '127.0.0.1', () => {{
         flags = self._build_headless_flags(
             use_cli_proxy_custom_provider=use_cli_proxy_custom_provider
         )
-        output_path = EnvironmentPaths.agent_dir / self._OUTPUT_FILENAME
 
         command = (
             f"mkdir -p {EnvironmentPaths.agent_dir.as_posix()} && "
             f"{self._nvm_prefix()}"
             f"printf '%s' {escaped_instruction} | "
             f"mastracode --prompt - {flags} "
-            f"2>&1 | tee {output_path.as_posix()}"
+            f"2>&1 | {self._stream_capture_invocation()}"
         )
 
         try:
@@ -976,12 +1567,26 @@ server.listen(port, '127.0.0.1', () => {{
                 )
             await self.exec_as_agent(
                 environment,
+                command=self._build_hook_ipc_observer_command(),
+                env=env,
+                timeout_sec=self._timeout,
+            )
+            await self.exec_as_agent(
+                environment,
+                command=self._build_stream_capture_command(),
+                env=env,
+                timeout_sec=self._timeout,
+            )
+            await self.exec_as_agent(
+                environment,
                 command=command,
                 env=env,
                 timeout_sec=self._timeout,
             )
+            self._write_events_sqlite(self._parse_stdout())
         except NonZeroAgentExitCodeError:
             events = self._parse_stdout()
+            self._write_events_sqlite(events)
             if not self._is_store_false_followup_error(events, self._read_stdout()):
                 raise
             self.logger.warning(
